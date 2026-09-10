@@ -212,6 +212,12 @@ class ClinicApp {
 
     get token() { return this.session?.access_token; }
 
+    // موظف الاستقبال يشوف بيانات المريض الأساسية والمواعيد بس، مش الملاحظات
+    // الطبية الحساسة (التشخيص، الوصفات، متابعة الحمل والأمراض المزمنة).
+    get isClinicalRole() {
+        return this.profile && ['doctor', 'admin', 'nurse'].includes(this.profile.role);
+    }
+
     // ---------- Auth ----------
     async login(event) {
         event.preventDefault();
@@ -295,6 +301,15 @@ class ClinicApp {
             document.getElementById('active-pregnancies').textContent = pregnancies.length;
         } catch (e) { console.error(e); }
 
+        if (!this.isClinicalRole) {
+            const lockedMsg = '<p class="text-gray-400 text-center py-6 text-sm">🔒 متاح للطاقم الطبي فقط</p>';
+            ['active-pregnancies-list', 'chronic-conditions-list', 'cardiology-conditions-list', 'oncology-conditions-list'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.innerHTML = lockedMsg;
+            });
+            return;
+        }
+
         try {
             const pregnancies = await pgFetch('active_pregnancies_view?select=*&order=edd_date.asc', { accessToken: token });
             let patientsById = {};
@@ -371,6 +386,17 @@ class ClinicApp {
             this._patientsCache = data || [];
             this.renderPatients(data);
         } catch (e) { showMessage('تعذّر تحميل المرضى: ' + e.message, 'error'); }
+    }
+
+    filterPatients(query) {
+        const q = (query || '').trim().toLowerCase();
+        if (!q) { this.renderPatients(this._patientsCache); return; }
+        const filtered = this._patientsCache.filter(p =>
+            (p.name || '').toLowerCase().includes(q) ||
+            (p.phone || '').toLowerCase().includes(q) ||
+            (p.patient_number || '').toLowerCase().includes(q)
+        );
+        this.renderPatients(filtered);
     }
 
     async createPatient(event) {
@@ -453,9 +479,20 @@ class ClinicApp {
     }
 
     async loadPatientVisits(id, token) {
+        const container = document.getElementById('patient-visits');
+        if (!this.isClinicalRole) {
+            // موظف الاستقبال: يشوف تواريخ الزيارات فقط، بدون أي تفاصيل طبية حساسة
+            try {
+                const visits = await pgFetch(`visits?patient_id=eq.${id}&select=created_at&order=created_at.desc`, { accessToken: token });
+                container.innerHTML = (visits && visits.length)
+                    ? `<p class="text-xs text-gray-500 mb-2">عدد الزيارات: ${visits.length}</p>` +
+                      visits.map(v => `<div class="border-b border-gray-100 py-2 text-sm text-gray-600">${fmtDate(v.created_at)}</div>`).join('')
+                    : '<p class="text-gray-400 text-sm text-center py-4">لا توجد زيارات مسجلة</p>';
+            } catch (e) { console.error(e); }
+            return;
+        }
         try {
             const visits = await pgFetch(`visits?patient_id=eq.${id}&select=*,prescriptions(*)&order=created_at.desc`, { accessToken: token });
-            const container = document.getElementById('patient-visits');
             container.innerHTML = `
                 <button id="new-visit-btn" class="w-full bg-blue-600 text-white py-2 rounded-lg text-sm hover:bg-blue-700 mb-3">+ تسجيل زيارة/كشف جديد</button>
                 <div id="new-visit-form-container"></div>
@@ -1133,6 +1170,8 @@ class ClinicApp {
         if (apptForm) apptForm.addEventListener('submit', (e) => this.createAppointment(e));
         const invoiceForm = document.getElementById('invoice-form');
         if (invoiceForm) invoiceForm.addEventListener('submit', (e) => this.createInvoice(e));
+        const searchBox = document.getElementById('patient-search-box');
+        if (searchBox) searchBox.addEventListener('input', (e) => this.filterPatients(e.target.value));
     }
 
     renderCurrentPage() {
@@ -1239,6 +1278,7 @@ class ClinicApp {
                 </div>
                 <div class="lg:col-span-2">
                     <h2 class="font-bold text-gray-800 mb-4">قائمة المرضى</h2>
+                    <input id="patient-search-box" type="text" placeholder="🔍 ابحث بالاسم، الهاتف، أو رقم الملف" class="w-full px-4 py-2.5 border border-gray-200 rounded-lg mb-4">
                     <div id="patients-list"></div>
                 </div>
             </div>
@@ -1303,8 +1343,9 @@ class ClinicApp {
     renderPatientDetailPage() {
         let specialty = this.clinic?.specialty || 'general';
         if (specialty === 'chronic') specialty = 'diabetes_hypertension';
-        const showPregnancy = specialty === 'obgyn' || specialty === 'general';
-        const showChronic = specialty !== 'obgyn'; // كل التخصصات غير النساء والتوليد تحتاج القسم ده (بأشكال مختلفة)
+        const clinical = this.isClinicalRole;
+        const showPregnancy = clinical && (specialty === 'obgyn' || specialty === 'general');
+        const showChronic = clinical && specialty !== 'obgyn'; // كل التخصصات غير النساء والتوليد تحتاج القسم ده (بأشكال مختلفة)
         const chronicMeta = {
             oncology: { title: 'متابعة الأورام والقياسات', icon: '🎗️' },
             cardiology: { title: 'متابعة القلب والقياسات', icon: '❤️' },
@@ -1315,6 +1356,7 @@ class ClinicApp {
         const columns = [`
             <div class="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
                 <h3 class="font-bold text-gray-800 mb-3">سجل الزيارات</h3>
+                ${!clinical ? '<p class="text-xs text-gray-400 mb-2">🔒 التفاصيل الطبية متاحة للطاقم الطبي فقط</p>' : ''}
                 <div id="patient-visits"></div>
             </div>`];
         if (showPregnancy) {
